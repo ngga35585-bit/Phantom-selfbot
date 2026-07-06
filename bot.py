@@ -1943,6 +1943,31 @@ def _print_banner() -> None:
     print(f"  {GR}{'═' * 66}{R}\n")
 
 
+async def _http_server() -> None:
+    """Mini-server HTTP pentru Render.com free plan (Web Service).
+    Asculta pe PORT env var si returneaza un status simplu.
+    Fara asta, Render stinge serviciul dupa 15 secunde."""
+    import aiohttp.web
+    port = int(os.environ.get("PORT", 8080))
+
+    async def _health(request):
+        return aiohttp.web.Response(
+            text="Phantom Selfbot — Online",
+            content_type="text/plain"
+        )
+
+    app = aiohttp.web.Application()
+    app.router.add_get("/", _health)
+    app.router.add_get("/health", _health)
+    runner = aiohttp.web.AppRunner(app)
+    await runner.setup()
+    site = aiohttp.web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"  {GN}✓ HTTP server pornit pe port {port}{R}  (Render health-check)")
+    # ruleaza la infinit
+    while True:
+        await asyncio.sleep(3600)
+
 async def main() -> None:
     global ALL_TOKENS
     _print_banner()
@@ -1962,6 +1987,8 @@ async def main() -> None:
     print(f"\n  {GN}►  Pornesc {BD}{len(ALL_TOKENS)}{R}{GN} selfbot(uri) valide...{R}\n")
     bots  = [make_bot(tok, i, config) for i, tok in enumerate(ALL_TOKENS)]
     tasks = [asyncio.create_task(b.start(tok)) for b, tok in zip(bots, ALL_TOKENS)]
+    # pornim si serverul HTTP pentru Render.com
+    tasks.append(asyncio.create_task(_http_server()))
     try:
         await asyncio.gather(*tasks)
     except (KeyboardInterrupt, SystemExit):
