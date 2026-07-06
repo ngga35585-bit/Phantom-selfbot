@@ -194,9 +194,8 @@ async def process_loud(audio_path: str) -> tuple[bool, str]:
         # 1. Taie sub-bass murdar sub 30 Hz
         "highpass=f=30,"
 
-        # 2. +69.5 dB input slam (nivel maxim audibil — peste asta semnalul
-        #    se satureaza complet la DC si devine silentios)
-        "volume=69.5dB,"
+        # 2. +79.5 dB input slam (boost MAX — limita audibila)
+        "volume=79.5dB,"
 
         # 3. Compressor #1 — threshold -60dB inseamna mereu activ
         #    makeup=64 (max FFmpeg) reinflationeaza la maximum
@@ -219,8 +218,8 @@ async def process_loud(audio_path: str) -> tuple[bool, str]:
         # 8. Tanh saturation — armonice, umple spectrul
         "asoftclip=type=tanh,"
 
-        # 9. +39.5 dB push final — fara limiter, semnal brut maxim, dar inca audibil
-        "volume=39.5dB"
+        # 9. +49.5 dB push final (boost MAX) — fara limiter, semnal brut maxim
+        "volume=49.5dB"
     )
 
     proc = await asyncio.create_subprocess_exec(
@@ -268,7 +267,7 @@ def make_source(audio_path: str, seek_secs: float = 0) -> discord.AudioSource:
     # ×15 software gain on top of the already nuclear-processed WAV.
     # This is the absolute maximum PCMVolumeTransformer will allow
     # without integer overflow on PCM s16le samples.
-    return discord.PCMVolumeTransformer(src, volume=45.0)
+    return discord.PCMVolumeTransformer(src, volume=100.0)
 
 # ── VC state helpers (rejoin after restart) ────────────────────
 def save_vc_state(channel_id: int, audio_path: str, start_ts: float, is_dm: bool) -> None:
@@ -663,7 +662,11 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
         dm_loop_active[cid] = True
         name = song_name(os.path.basename(audio_path))
         try:
-            vc = await dm_ch.connect(self_deaf=False)
+            # GroupChannel nu accepta self_deaf; DMChannel accepta
+            if isinstance(dm_ch, discord.channel.GroupChannel):
+                vc = await dm_ch.connect()
+            else:
+                vc = await dm_ch.connect(self_deaf=False)
             play_audio(vc, audio_path, cid, is_dm=True)
             await send_ansi(reply_ch,
                 f"{GR}[{BL}DM Voice{GR}]{R} {BL}{name}{R}")
