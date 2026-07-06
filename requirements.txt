@@ -1,0 +1,3 @@
+# Discord selfbot with voice support
+discord.py-self[voice]
+PyNaCl
