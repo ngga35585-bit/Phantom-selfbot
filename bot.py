@@ -75,7 +75,7 @@ RD  = "\u001b[31m"
 MG  = "\u001b[35m"
 CY  = "\u001b[36m"
 
-OWNER_ID:   int = 1505187656781533316
+OWNER_ID:   int = 290438400044171264
 STATE_FILE: str = os.path.join("selfbot", "vc_state.json")  # rejoin state
 
 # ──────────────────────────────────────────────────────────────
