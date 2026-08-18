@@ -2229,29 +2229,42 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
 # ──────────────────────────────────────────────────────────────
 async def validate_token(token: str) -> tuple[bool, str]:
     """Returns (valid, username_or_error)."""
-    try:
-        async with aiohttp.ClientSession() as sess:
-            async with sess.get(
-                f"{DISCORD_API}/users/@me",
-                headers={"authorization": token},
-            ) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    return True, data.get("username", "?")
-                else:
+    for attempt in range(3):
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(
+                    f"{DISCORD_API}/users/@me",
+                    headers={"authorization": token},
+                ) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        return True, data.get("username", "?")
+                    if r.status == 429:
+                        retry_after = r.headers.get("Retry-After", "1")
+                        try:
+                            wait_for = min(max(float(retry_after), 1.0), 30.0)
+                        except ValueError:
+                            wait_for = 1.0
+                        if attempt < 2:
+                            await asyncio.sleep(wait_for)
+                            continue
+                        return True, "RATE_LIMITED — token pastrat"
                     return False, f"HTTP {r.status}"
-    except Exception as e:
-        return False, str(e)
+        except Exception as e:
+            return False, str(e)
+    return True, "RATE_LIMITED — token pastrat"
 
 async def validate_all_tokens(tokens: list[str]) -> list[str]:
     """Check every token, print results, return only valid ones."""
     print(f"Validez {len(tokens)} token(e)...")
     valid: list[str] = []
-    tasks = [validate_token(t) for t in tokens]
-    results = await asyncio.gather(*tasks)
-    for i, (tok, (ok, info)) in enumerate(zip(tokens, results)):
+    for i, tok in enumerate(tokens):
+        if i:
+            await asyncio.sleep(0.5)
+        ok, info = await validate_token(tok)
         if ok:
-            print(f"  [{i+1}] OK  — {info}")
+            label = "Pastrat" if info.startswith("RATE_LIMITED") else "OK"
+            print(f"  [{i+1}] {label} — {info}")
             valid.append(tok)
         else:
             print(f"  [{i+1}] INVALID — {info} (eliminat)")
