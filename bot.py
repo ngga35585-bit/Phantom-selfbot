@@ -603,6 +603,7 @@ HELP_VOICE = (
     f"{WH},setprefix <p>              {GR}|{BL} schimba prefix{R}\n"
     f"{WH},uptime                     {GR}|{BL} timp rulare{R}\n"
     f"{WH},users                      {GR}|{BL} conturi conectate{R}\n"
+    f"{WH},askai <intrebare>          {GR}|{BL} ghid Phantom offline{R}\n"
     f"{WH},help                       {GR}|{BL} acest meniu{R}"
 )
 
@@ -673,6 +674,89 @@ HELP_SUS = (
 )
 
 # ──────────────────────────────────────────────────────────────
+# LOCAL PROJECT GUIDE
+# ──────────────────────────────────────────────────────────────
+def askai_local_answer(question: str, configured_prefix: str, bot_index: int) -> str:
+    """Answer project questions locally, without sending data to an API."""
+    q = " ".join(question.casefold().split())
+    prefix = configured_prefix or BASE_PREFIX
+    use_prefix = prefix if prefix != BASE_PREFIX else BASE_PREFIX
+
+    if not q:
+        return (
+            "ASKAI • Ghidul Phantom\n"
+            f"Scrie o întrebare după {use_prefix}askai.\n"
+            f"Exemplu: {use_prefix}askai cum pornesc muzica?"
+        )
+
+    if q in {"help", "ajutor", "comenzi", "ce poate", "ce stii", "ce știi"} or "comenz" in q:
+        return (
+            "ASKAI • Ce știe Phantom\n"
+            "Voice: ,jvc, ,dmjvc, ,groupjvc, ,stop, ,swap, ,lista, ,addaudio, "
+            ",processall.\n"
+            "Utilitare: ,help, ,uptime, ,users, ,setprefix.\n"
+            "Spam/fun: !, $, @, +, #, %, . au meniuri separate.\n"
+            f"Întreabă-mă: {use_prefix}askai cum adaug audio?"
+        )
+
+    if "prefix" in q or "nu raspunde" in q or "nu răspunde" in q or "comanda" in q:
+        return (
+            "ASKAI • Comenzile nu răspund?\n"
+            f"Pentru botul {bot_index + 1}, prefixul configurat este {prefix!r}; "
+            f"prefixul universal pentru voice este {BASE_PREFIX!r}.\n"
+            f"Încearcă {BASE_PREFIX}help sau {prefix}help, fără spațiu între prefix și comandă.\n"
+            "Dacă tot nu merge: verifică botul online, tokenul valid și logul "
+            "pentru [COMMAND ERROR] sau [SEND ERROR]."
+        )
+
+    if any(word in q for word in ("muzic", "audio", "melodi", "voice", "cânt", "cant")):
+        return (
+            "ASKAI • Cum pornești muzica\n"
+            f"1. Adaugă audio: {BASE_PREFIX}addaudio <URL YouTube> sau atașează un fișier.\n"
+            f"2. Vezi lista: {BASE_PREFIX}lista.\n"
+            f"3. Procesează volumul: {BASE_PREFIX}processall.\n"
+            f"4. Pornește în voice: {BASE_PREFIX}jvc <ID canal> [nr/name].\n"
+            f"5. Oprește: {BASE_PREFIX}stop.\n"
+            "Dacă lista este goală, botul nu are ce reda."
+        )
+
+    if "askai" in q or "ghid" in q or "înveți" in q or "inveti" in q:
+        return (
+            "ASKAI • Ghid rapid\n"
+            f"{use_prefix}help — meniul complet.\n"
+            f"{use_prefix}lista — melodiile disponibile.\n"
+            f"{use_prefix}uptime — cât timp rulează botul.\n"
+            f"{use_prefix}askai <întrebare> — explică o funcție Phantom.\n"
+            "Poți întreba despre voice, audio, prefixe, erori, tokenuri sau configurare."
+        )
+
+    if any(word in q for word in ("token", "config", "porn", "start", "deploy")):
+        return (
+            "ASKAI • Pornire și configurare\n"
+            "Botul citește tokenul din secretul DISCORD_TOKEN sau din tokens.txt "
+            "(câte un token pe linie). Nu trimite tokenul în Discord sau chat.\n"
+            "Prefixele per token sunt în config.json; botul acceptă și , pentru "
+            "comenzile voice. Pentru pornire locală: bash build.sh, apoi python bot.py."
+        )
+
+    if "spam" in q or "fun" in q or "global" in q:
+        return (
+            "ASKAI • Meniuri secundare\n"
+            "!help / !start — single-line.\n"
+            "$help / $start — multi-line.\n"
+            "@help / @start — repeated.\n"
+            "+help / +start — spiced și status.\n"
+            "#fun — fun; %help — global; .help — sus.\n"
+            "Pentru lista exactă folosește ,help. Folosește funcțiile responsabil."
+        )
+
+    return (
+        "ASKAI • Nu am găsit exact subiectul, dar te pot ghida.\n"
+        "Încearcă: cum pornesc muzica? | de ce nu răspunde comanda? | "
+        "ce prefix are botul? | cum adaug o melodie? | ce comenzi există?"
+    )
+
+# ──────────────────────────────────────────────────────────────
 # BOT FACTORY
 # ──────────────────────────────────────────────────────────────
 def make_bot(token: str, index: int, config: dict) -> discord.Client:
@@ -698,18 +782,21 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
         try:
             text = text[:1980]
             await ch.send(f"```ansi\n{text}\n```")
-        except Exception:
+        except Exception as first_error:
             try:
                 plain = re.sub(r"\u001b\[[^m]*m", "", text)
                 await ch.send(f"```\n{plain}\n```")
-            except Exception:
-                pass
+            except Exception as second_error:
+                print(
+                    f"  {label_txt} [SEND ERROR] ansi={first_error!r} "
+                    f"plain={second_error!r}"
+                )
 
     async def send_plain(ch, text: str) -> None:
         try:
             await ch.send(text)
-        except Exception:
-            pass
+        except Exception as error:
+            print(f"  {label_txt} [SEND ERROR] {error!r}")
 
     # ── playback ───────────────────────────────────────────────
 
@@ -789,6 +876,12 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
             await send_ansi(reply_ch, f"{GR}[{YL}ERR{GR}]{R} {YL}{exc!r}{R}")
 
     # ── voice command handlers ─────────────────────────────────
+
+    async def do_askai(args: str, ch) -> None:
+        """Local Phantom assistant: instant answers without an external API."""
+        question = args.strip()
+        answer = askai_local_answer(question, prefix, index)
+        await send_ansi(ch, answer)
 
     async def do_help(ch) -> None:
         files = list_audio()
@@ -2025,9 +2118,12 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
 
     # ── on_message ─────────────────────────────────────────────
 
-    @bot.event
-    async def on_message(msg: discord.Message) -> None:
-        if msg.author.id != bot.user.id:
+    async def _handle_message(msg: discord.Message) -> None:
+        author = getattr(msg, "author", None)
+        current_user = bot.user
+        if author is None or current_user is None:
+            return
+        if getattr(author, "id", None) != current_user.id:
             return
         content = msg.content
         if not content:
@@ -2036,12 +2132,39 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
         guild = getattr(msg, "guild", None)
         ch    = msg.channel
 
+        # config.json can assign a different voice prefix to each token.
+        # The old parser only accepted "," even though commands.Bot used the
+        # configured prefix, so commands sent with "!", "." or "@" were
+        # silently routed to another parser (or ignored).
+        configured_prefix = prefix if isinstance(prefix, str) and prefix else BASE_PREFIX
+        voice_commands = {
+            "help", "lista", "jvc", "dmjvc", "groupjvc", "stop", "stopall",
+            "swap", "addaudio", "addfile", "renamefile", "pack", "processall",
+            "rename", "move", "addtoken", "removetoken", "setprefix", "uptime",
+            "users", "askai",
+        }
+        configured_voice = None
+        if configured_prefix != BASE_PREFIX and content.startswith(configured_prefix):
+            configured_rest = content[len(configured_prefix):].strip()
+            configured_parts = configured_rest.split(maxsplit=1)
+            configured_cmd = (
+                configured_parts[0].lower() if configured_parts else ""
+            )
+            if configured_cmd in voice_commands:
+                configured_voice = (
+                    configured_cmd,
+                    configured_parts[1] if len(configured_parts) > 1 else "",
+                )
+
         # ── , VOICE ──────────────────────────────────────────
-        if content.startswith(","):
-            rest  = content[1:].strip()
-            parts = rest.split(maxsplit=1)
-            cmd   = parts[0].lower() if parts else ""
-            args  = parts[1] if len(parts) > 1 else ""
+        if content.startswith(BASE_PREFIX) or configured_voice is not None:
+            if configured_voice is None:
+                rest  = content[len(BASE_PREFIX):].strip()
+                parts = rest.split(maxsplit=1)
+                cmd   = parts[0].lower() if parts else ""
+                args  = parts[1] if len(parts) > 1 else ""
+            else:
+                cmd, args = configured_voice
 
             if   cmd == "help":       await do_help(ch)
             elif cmd == "lista":      await do_lista(ch)
@@ -2062,6 +2185,7 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
             elif cmd == "removetoken":  await do_removetoken(args, msg, ch)
             elif cmd == "setprefix":    await do_setprefix(args, ch)
             elif cmd == "uptime":       await do_uptime(ch)
+            elif cmd == "askai":        await do_askai(args, ch)
             elif cmd == "users":
                 if not ALL_BOTS:
                     await send_ansi(ch, f"{YL}Niciun bot conectat.{R}")
@@ -2195,6 +2319,16 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
             if cmd in SUS_CMDS:
                 await do_sus(msg, cmd)
 
+    @bot.event
+    async def on_message(msg: discord.Message) -> None:
+        try:
+            await _handle_message(msg)
+        except Exception as error:
+            # Without this wrapper discord.py can leave a command looking
+            # unresponsive when a channel/permission/API call raises.
+            print(f"  {label_txt} [COMMAND ERROR] {error!r}")
+            traceback.print_exc()
+
     # ── on_ready ───────────────────────────────────────────────
 
     async def _auto_rejoin_task() -> None:
@@ -2290,118 +2424,4 @@ async def validate_token(token: str) -> tuple[bool, str]:
                         data = await r.json()
                         return True, data.get("username", "?")
                     if r.status == 429:
-                        retry_after = r.headers.get("Retry-After", "1")
-                        try:
-                            wait_for = min(max(float(retry_after), 1.0), 30.0)
-                        except ValueError:
-                            wait_for = 1.0
-                        if attempt < 2:
-                            await asyncio.sleep(wait_for)
-                            continue
-                        return True, "RATE_LIMITED — token pastrat"
-                    return False, f"HTTP {r.status}"
-        except Exception as e:
-            return False, str(e)
-    return True, "RATE_LIMITED — token pastrat"
-
-async def validate_all_tokens(tokens: list[str]) -> list[str]:
-    """Check every token, print results, return only valid ones."""
-    print(f"Validez {len(tokens)} token(e)...")
-    valid: list[str] = []
-    for i, tok in enumerate(tokens):
-        if i:
-            await asyncio.sleep(0.5)
-        ok, info = await validate_token(tok)
-        if ok:
-            label = "Pastrat" if info.startswith("RATE_LIMITED") else "OK"
-            print(f"  [{i+1}] {label} — {info}")
-            valid.append(tok)
-        else:
-            print(f"  [{i+1}] INVALID — {info} (eliminat)")
-    return valid
-
-# ──────────────────────────────────────────────────────────────
-# MAIN
-# ──────────────────────────────────────────────────────────────
-def _print_banner() -> None:
-    print(f"\n{MG}{BD}"
-          "  ██████╗ ██╗  ██╗ █████╗ ███╗   ██╗████████╗ ██████╗ ███╗   ███╗\n"
-          "  ██╔══██╗██║  ██║██╔══██╗████╗  ██║╚══██╔══╝██╔═══██╗████╗ ████║\n"
-          "  ██████╔╝███████║███████║██╔██╗ ██║   ██║   ██║   ██║██╔████╔██║\n"
-          "  ██╔═══╝ ██╔══██║██╔══██║██║╚██╗██║   ██║   ██║   ██║██║╚██╔╝██║\n"
-          "  ██║     ██║  ██║██║  ██║██║ ╚████║   ██║   ╚██████╔╝██║ ╚═╝ ██║\n"
-          f"  ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝     ╚═╝{R}")
-    print(f"  {CY}{BD}               ☠   S E L F B O T   ☠{R}")
-    print(f"  {GR}{'═' * 66}{R}")
-    print(f"  {RD}{BD}🔊  NUCLEAR LOUD  •  NO LIMITER  •  ×15 GAIN  •  +60dB CHAIN{R}")
-    print(f"  {GR}{'═' * 66}{R}\n")
-
-
-async def _http_server() -> None:
-    """Mini-server HTTP pentru Render.com free plan (Web Service).
-    Asculta pe PORT env var si returneaza un status simplu.
-    Fara asta, Render stinge serviciul dupa 15 secunde."""
-    import aiohttp.web
-    try:
-        port = int(os.environ.get("PORT", "8080"))
-    except ValueError:
-        port = 8080
-    if not 1 <= port <= 65535:
-        port = 8080
-
-    async def _health(request):
-        return aiohttp.web.Response(
-            text="Phantom Selfbot — Online",
-            content_type="text/plain"
-        )
-
-    app = aiohttp.web.Application()
-    app.router.add_get("/", _health)
-    app.router.add_get("/health", _health)
-    runner = aiohttp.web.AppRunner(app)
-    await runner.setup()
-    site = aiohttp.web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"  {GN}✓ HTTP server pornit pe port {port}{R}  (Render health-check)")
-    # ruleaza la infinit
-    while True:
-        await asyncio.sleep(3600)
-
-async def main() -> None:
-    global ALL_TOKENS
-    _print_banner()
-    # Pornim health-check-ul inainte de validarea tokenurilor, astfel incat
-    # platforma sa detecteze imediat PORT chiar daca Discord raspunde lent.
-    http_task = asyncio.create_task(_http_server())
-    await asyncio.sleep(0)
-    raw_tokens = load_tokens()
-    config     = load_config()
-
-    if not raw_tokens:
-        print(f"  {RD}✗  Niciun token gasit!{R}  →  Seteaza {YL}DISCORD_TOKEN{R} in Secrets sau {YL}selfbot/tokens.txt{R}")
-        await http_task
-        return
-
-    ALL_TOKENS = await validate_all_tokens(raw_tokens)
-
-    if not ALL_TOKENS:
-        print(f"  {RD}✗  Niciun token valid!{R}  →  Verifica tokenurile si reincearca.")
-        await http_task
-        return
-
-    print(f"\n  {GN}►  Pornesc {BD}{len(ALL_TOKENS)}{R}{GN} selfbot(uri) valide...{R}\n")
-    bots  = [make_bot(tok, i, config) for i, tok in enumerate(ALL_TOKENS)]
-    tasks = [asyncio.create_task(b.start(tok)) for b, tok in zip(bots, ALL_TOKENS)]
-    # serverul HTTP este deja pornit pentru health-check-ul platformei
-    tasks.append(http_task)
-    try:
-        await asyncio.gather(*tasks)
-    except (KeyboardInterrupt, SystemExit):
-        for b in bots:
-            try:
-                await b.close()
-            except Exception:
-                pass
-
-if __name__ == "__main__":
-    asyncio.run(main())
+ 
