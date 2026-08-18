@@ -58,6 +58,9 @@ TOKENS_FILE = os.path.join(AUDIO_DIR, "tokens.txt")
 SINGLE_FILE = os.path.join(AUDIO_DIR, "test.txt")
 MULTI_FILE  = os.path.join(AUDIO_DIR, "test2.txt")
 SPICED_FILE = os.path.join(AUDIO_DIR, "test3.txt")
+PACK_DIR    = os.path.join(AUDIO_DIR, "pack_files")
+PACK_EXTENSIONS = {".txt", ".text", ".md", ".csv", ".log"}
+MAX_PACK_FILE_BYTES = 1_048_576
 START_TIME  = time.time()
 BASE_PREFIX = ","
 DISCORD_API = "https://discord.com/api/v10"
@@ -90,6 +93,8 @@ SPAM_DELAY:   dict[tuple, float]        = {}
 SPAM_TYPING:  dict[tuple, bool]         = {}
 SPAM_TASKS:   dict[tuple, asyncio.Task] = {}
 SPAM_MSG:     dict[int, str]            = {}   # for repeated: token_idx -> message
+SPAM_FILE:    dict[tuple[int, int], str] = {}  # (channel_id, token_idx) -> pack file
+SPAM_FORMAT:  dict[tuple[int, int], str] = {}  # (channel_id, token_idx) -> pack format
 
 GROUP_NAME_RUNNING = False
 _GROUP_NAME_TASK: asyncio.Task | None = None
@@ -355,6 +360,70 @@ def load_spam_spiced() -> list[str]:
     blocks = [b.strip() for b in content.split("\n\n") if b.strip()]
     return blocks or load_spam_single()
 
+def list_pack_files() -> list[str]:
+    os.makedirs(PACK_DIR, exist_ok=True)
+    return sorted(
+        (
+            name for name in os.listdir(PACK_DIR)
+            if os.path.isfile(os.path.join(PACK_DIR, name))
+            and os.path.splitext(name)[1].lower() in PACK_EXTENSIONS
+        ),
+        key=str.lower,
+    )
+
+def load_pack_file(path: str) -> list[str]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return [line.strip()[:1900] for line in f if line.strip()]
+    except (OSError, UnicodeDecodeError):
+        return []
+
+PACK_FORMAT_ALIASES = {
+    "plain": "plain",
+    "normal": "plain",
+    "backtick": "backticks",
+    "backticks": "backticks",
+    "bt": "backticks",
+    "#": "hash",
+    "hash": "hash",
+    "hashtag": "hash",
+    "> #": "quote_hash",
+    "quote": "quote_hash",
+    "quotehash": "quote_hash",
+    "quote-hash": "quote_hash",
+    "vertical": "vertical",
+    "vert": "vertical",
+}
+
+def normalize_pack_format(value: str) -> str | None:
+    return PACK_FORMAT_ALIASES.get(value.strip().lower())
+
+def load_pack_messages(path: str, pack_format: str = "plain") -> list[str]:
+    lines = load_pack_file(path)
+    if pack_format == "backticks":
+        return [f"`{line}`" for line in lines]
+    if pack_format == "hash":
+        return [f"# {line}" for line in lines]
+    if pack_format == "quote_hash":
+        return [f"> # {line}" for line in lines]
+    if pack_format == "vertical":
+        messages = []
+        for start in range(0, len(lines), 10):
+            batch = []
+            current_length = 0
+            for line in lines[start:start + 10]:
+                extra = len(line) + (1 if batch else 0)
+                if batch and current_length + extra > 1900:
+                    messages.append("\n".join(batch))
+                    batch = []
+                    current_length = 0
+                batch.append(line)
+                current_length += len(line) + (1 if len(batch) > 1 else 0)
+            if batch:
+                messages.append("\n".join(batch))
+        return messages
+    return lines
+
 async def api_post(sess: aiohttp.ClientSession, token: str, channel_id: int, content: str):
     try:
         async with sess.post(
@@ -409,6 +478,17 @@ async def _spam_loop(stype: str, idx: int, channel_id: int, mentions_str: str):
                             text = f"{mentions_str} {line}".strip()
                             await api_post(sess, token, channel_id, text)
                             await asyncio.sleep(delay)
+                elif stype == "k":
+                    pack_path = SPAM_FILE.get((channel_id, idx), "")
+                    pack_format = SPAM_FORMAT.get((channel_id, idx), "plain")
+                    for message in load_pack_messages(pack_path, pack_format):
+                        if not SPAM_RUNNING.get(key):
+                            break
+                        if typing:
+                            await api_typing(sess, token, channel_id)
+                        text = f"{mentions_str} {message}".strip()
+                        await api_post(sess, token, channel_id, text)
+                        await asyncio.sleep(delay)
                 elif stype == "r":
                     msg = SPAM_MSG.get(idx, "spam")
                     text = f"{mentions_str} {msg}".strip()
@@ -488,6 +568,11 @@ HELP_VOICE = (
     f"{WH},swap <nr/name>             {GR}|{BL} schimba melodia{R}\n"
     f"{WH},lista                      {GR}|{BL} lista melodii{R}\n"
     f"{WH},addaudio <url/attach>      {GR}|{BL} adauga audio{R}\n"
+    f"{WH},addfile [nume]              {GR}|{BL} adauga un fisier text atasat{R}\n"
+    f"{WH},renamefile <nr/nume> <nou>  {GR}|{BL} redenumeste un fisier text{R}\n"
+    f"{WH},pack [nr/nume]              {GR}|{BL} spameaza dintr-un fisier text{R}\n"
+    f"{WH},pack list / ,pack stop       {GR}|{BL} listeaza sau opreste pack{R}\n"
+    f"{GR}  Pack implicit: 10 linii intr-un mesaj; formate alternative: plain, backticks, #, > #{R}\n"
     f"{WH},processall                 {GR}|{BL} proceseaza toate loud{R}\n"
     f"{WH},rename <nr> <nume>         {GR}|{BL} redenume melodie (owner){R}\n"
     f"{WH},move <nr> <nr_nou>         {GR}|{BL} muta pe slot (owner){R}\n"
@@ -683,7 +768,7 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
             f"{HELP_VOICE}\n\n"
             f"{GR}Alte prefixuri:{R}\n"
             f"{YL}!single {GR}|{BL} $multi {GR}|{BL} {RD}@repeated {GR}|{BL} {CY}+spiced {GR}|{BL} {MG}#fun {GR}|{BL} {GN}%global {GR}|{BL} .sus{R}\n"
-            f"{GR}Ver{GR}: {BL}3.0{R}  {GR}Melodii:{R} {BL}{len(files)}{R}"
+            f"{GR}Ver{GR}: {BL}3.5 made by Becali.18m{R}  {GR}Melodii:{R} {BL}{len(files)}{R}"
         )
         await send_ansi(ch, desc)
 
@@ -942,6 +1027,246 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
             await send_ansi(ch, f"{GR}[{BL}OK{GR}]{R} {WH}{nxt:02d}.mp3{R} adaugat.")
         else:
             await send_ansi(ch, f"{YL}Eroare: {result[:200]}{R}")
+
+    async def do_addfile(args: str, msg: discord.Message, ch) -> None:
+        if not msg.attachments:
+            await send_ansi(ch, f"{YL}Folosire: ,addfile [nume] cu un fisier text atasat.{R}")
+            return
+
+        att = msg.attachments[0]
+        filename = os.path.basename((args.strip() or att.filename or "pack.txt"))
+        filename = re.sub(r"[^0-9A-Za-z._ -]", "_", filename).strip(" .")
+        if not filename:
+            filename = "pack.txt"
+        stem, ext = os.path.splitext(filename)
+        if ext.lower() not in PACK_EXTENSIONS:
+            filename = f"{filename}.txt"
+        filename = filename[:120]
+
+        if getattr(att, "size", 0) > MAX_PACK_FILE_BYTES:
+            await send_ansi(ch, f"{YL}Fisierul este prea mare. Limita este 1 MB.{R}")
+            return
+
+        await send_ansi(ch, f"{GR}[{YL}Download{GR}]{R} {WH}{filename}{R}")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(att.url) as resp:
+                    if resp.status != 200:
+                        await send_ansi(ch, f"{YL}Nu am putut descarca fisierul (HTTP {resp.status}).{R}")
+                        return
+                    data = await resp.read()
+        except Exception as exc:
+            await send_ansi(ch, f"{YL}Eroare la descarcare: {exc!r}{R}")
+            return
+
+        if len(data) > MAX_PACK_FILE_BYTES:
+            await send_ansi(ch, f"{YL}Fisierul este prea mare. Limita este 1 MB.{R}")
+            return
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            await send_ansi(ch, f"{YL}Fisierul trebuie sa fie text UTF-8.{R}")
+            return
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            await send_ansi(ch, f"{YL}Fisierul nu contine mesaje text.{R}")
+            return
+
+        os.makedirs(PACK_DIR, exist_ok=True)
+        out_path = os.path.join(PACK_DIR, filename)
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except OSError as exc:
+            await send_ansi(ch, f"{YL}Nu pot salva fisierul: {exc!r}{R}")
+            return
+
+        await send_ansi(
+            ch,
+            f"{GR}[{BL}File{GR}]{R} {WH}{filename}{R} adaugat — "
+            f"{BL}{len(lines)}{R} mesaje. Foloseste {CY},pack {filename}{R}",
+        )
+
+    async def do_pack(args: str, msg: discord.Message, ch) -> None:
+        files = list_pack_files()
+        choice = args.strip()
+
+        if choice.lower() in ("list", "ls", "lista"):
+            if not files:
+                await send_ansi(ch, f"{YL}Nu ai niciun fisier text. Ataseaza unul cu ,addfile.{R}")
+                return
+            rows = [
+                f"{GR}[{BL}{i}{GR}]{R} {WH}{name}{R}"
+                for i, name in enumerate(files, 1)
+            ]
+            await send_ansi(
+                ch,
+                f"{BD}{UL}PACK FILES ({len(files)}){R}\n"
+                + "\n".join(rows)
+                + f"\n{GR}Folosire: {CY},pack <nr sau nume>{R}",
+            )
+            return
+
+        if choice.lower() in ("stop", "stopall"):
+            for i in range(len(ALL_TOKENS)):
+                stop_spam("k", i)
+            await send_ansi(ch, f"{YL}Pack oprit pentru toate tokenurile.{R}")
+            return
+
+        if not files:
+            await send_ansi(ch, f"{YL}Nu ai niciun fisier text. Ataseaza unul cu ,addfile.{R}")
+            return
+
+        # Pack groups 10 lines into one message by default.
+        pack_format = "vertical"
+        selection = choice
+        selected = None
+
+        # With one file, ",pack vertical" is a convenient shortcut.
+        direct_format = normalize_pack_format(choice)
+        if len(files) == 1 and direct_format:
+            selected = files[0]
+            pack_format = direct_format
+            selection = ""
+        elif choice:
+            parts = choice.split()
+            if len(parts) >= 3:
+                suffix = " ".join(parts[-2:])
+                suffix_format = normalize_pack_format(suffix)
+                if suffix_format:
+                    pack_format = suffix_format
+                    selection = " ".join(parts[:-2])
+            if selection == choice and len(parts) >= 2:
+                suffix_format = normalize_pack_format(parts[-1])
+                if suffix_format:
+                    pack_format = suffix_format
+                    selection = " ".join(parts[:-1])
+
+        if selected is None:
+            if not selection:
+                if len(files) == 1:
+                    selected = files[0]
+                else:
+                    rows = [
+                        f"{GR}[{BL}{i}{GR}]{R} {WH}{name}{R}"
+                        for i, name in enumerate(files, 1)
+                    ]
+                    await send_ansi(
+                        ch,
+                        f"{YL}Ai mai multe fisiere. Alege unul cu {CY},pack <nr> [format]{YL}:{R}\n"
+                        + "\n".join(rows),
+                    )
+                    return
+            elif selection.isdigit():
+                file_index = int(selection)
+                if file_index < 1 or file_index > len(files):
+                    await send_ansi(ch, f"{YL}Index invalid (1-{len(files)}).{R}")
+                    return
+                selected = files[file_index - 1]
+            else:
+                matches = [
+                    name for name in files
+                    if name.lower() == selection.lower()
+                    or os.path.splitext(name)[0].lower() == selection.lower()
+                ]
+                if len(matches) != 1:
+                    await send_ansi(ch, f"{YL}Fisier negasit. Foloseste ,pack list.{R}")
+                    return
+                selected = matches[0]
+
+        pack_path = os.path.join(PACK_DIR, selected)
+        if not load_pack_messages(pack_path, pack_format):
+            await send_ansi(ch, f"{YL}Fisierul ales este gol sau invalid.{R}")
+            return
+        if not ALL_TOKENS:
+            await send_ansi(ch, f"{YL}Nu exista tokenuri conectate.{R}")
+            return
+
+        mentions = _mentions_str(msg.mentions)
+        for i in range(len(ALL_TOKENS)):
+            SPAM_FILE[(ch.id, i)] = pack_path
+            SPAM_FORMAT[(ch.id, i)] = pack_format
+            start_spam("k", i, ch.id, mentions)
+        await send_ansi(
+            ch,
+            f"{GN}Pack pornit din {WH}{selected}{R} pentru "
+            f"{BL}{len(ALL_TOKENS)}{R} tokenuri, format {CY}{pack_format}{R}. "
+            f"Foloseste {CY},pack stop{R} pentru oprire.",
+        )
+
+    async def do_renamefile(args: str, msg: discord.Message, ch) -> None:
+        if OWNER_ID is not None and msg.author.id != OWNER_ID:
+            await send_ansi(ch, f"{YL}Doar ownerul poate redenumi fisierele text.{R}")
+            return
+
+        parts = args.split(maxsplit=1)
+        if len(parts) < 2:
+            await send_ansi(ch, f"{YL}Folosire: ,renamefile <nr/nume> <nume_nou>{R}")
+            return
+
+        files = list_pack_files()
+        if not files:
+            await send_ansi(ch, f"{YL}Nu ai niciun fisier text adaugat.{R}")
+            return
+
+        old_choice, new_name = parts[0].strip(), parts[1].strip()
+        if old_choice.isdigit():
+            file_index = int(old_choice)
+            if file_index < 1 or file_index > len(files):
+                await send_ansi(ch, f"{YL}Index invalid (1-{len(files)}).{R}")
+                return
+            old_name = files[file_index - 1]
+        else:
+            matches = [
+                name for name in files
+                if name.lower() == old_choice.lower()
+                or os.path.splitext(name)[0].lower() == old_choice.lower()
+            ]
+            if len(matches) != 1:
+                await send_ansi(ch, f"{YL}Fisier negasit. Foloseste ,pack list.{R}")
+                return
+            old_name = matches[0]
+
+        new_name = os.path.basename(new_name)
+        new_name = re.sub(r"[^0-9A-Za-z._ -]", "_", new_name).strip(" .")
+        if not new_name:
+            await send_ansi(ch, f"{YL}Numele nou este invalid.{R}")
+            return
+
+        old_ext = os.path.splitext(old_name)[1].lower()
+        new_ext = os.path.splitext(new_name)[1].lower()
+        if not new_ext:
+            new_name += old_ext if old_ext in PACK_EXTENSIONS else ".txt"
+        elif new_ext not in PACK_EXTENSIONS:
+            await send_ansi(ch, f"{YL}Extensie nesuportata. Foloseste un fisier text.{R}")
+            return
+        new_name = new_name[:120]
+
+        old_path = os.path.join(PACK_DIR, old_name)
+        new_path = os.path.join(PACK_DIR, new_name)
+        if os.path.abspath(old_path) == os.path.abspath(new_path):
+            await send_ansi(ch, f"{YL}Fisierul are deja acest nume.{R}")
+            return
+        if os.path.exists(new_path):
+            await send_ansi(ch, f"{YL}Exista deja un fisier cu numele {new_name}.{R}")
+            return
+
+        try:
+            os.rename(old_path, new_path)
+        except OSError as exc:
+            await send_ansi(ch, f"{YL}Nu pot redenumi fisierul: {exc!r}{R}")
+            return
+
+        # Keep an active pack working after the source file is renamed.
+        for key, path in list(SPAM_FILE.items()):
+            if os.path.abspath(path) == os.path.abspath(old_path):
+                SPAM_FILE[key] = new_path
+        await send_ansi(
+            ch,
+            f"{GR}[{BL}RenameFile{GR}]{R} {WH}{old_name}{R} "
+            f"{GR}->{R} {WH}{new_name}{R}",
+        )
 
     async def do_addtoken(args: str, msg: discord.Message, ch) -> None:
         if OWNER_ID is not None and msg.author.id != OWNER_ID:
@@ -1684,6 +2009,9 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
             elif cmd == "stopall":    await do_stopall(ch)
             elif cmd == "swap":       await do_swap(args, guild, ch)
             elif cmd == "addaudio":   await do_addaudio(args, msg, ch)
+            elif cmd == "addfile":    await do_addfile(args, msg, ch)
+            elif cmd == "renamefile": await do_renamefile(args, msg, ch)
+            elif cmd == "pack":       await do_pack(args, msg, ch)
             elif cmd == "processall": await do_process_all(ch)
             elif cmd == "rename":     await do_rename(args, msg, ch)
             elif cmd == "move":       await do_move(args, msg, ch)
