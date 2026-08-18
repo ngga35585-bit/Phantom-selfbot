@@ -79,7 +79,7 @@ MG  = "\u001b[35m"
 CY  = "\u001b[36m"
 
 OWNER_ID:   int = 290438400044171264
-STATE_FILE: str = os.path.join("selfbot", "vc_state.json")  # rejoin state
+STATE_FILE: str = os.path.join(AUDIO_DIR, "vc_state.json")  # rejoin state
 
 # ──────────────────────────────────────────────────────────────
 # SHARED SPAM STATE  (module-level, shared across all bots)
@@ -105,14 +105,22 @@ DEFAULT_DELAY = 1.5
 # CONFIG / TOKEN HELPERS
 # ──────────────────────────────────────────────────────────────
 def load_config() -> dict:
-    if os.path.isfile(CONFIG_FILE):
+    if not os.path.isfile(CONFIG_FILE):
+        return {}
+    try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+            config = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        # A partially written config must not prevent the bots from starting.
+        return {}
+    return config if isinstance(config, dict) else {}
 
 def save_config(cfg: dict) -> None:
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+    temp_file = f"{CONFIG_FILE}.tmp"
+    with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(temp_file, CONFIG_FILE)
 
 def load_tokens() -> list[str]:
     tokens: list[str] = []
@@ -154,6 +162,12 @@ def list_audio() -> list[str]:
         and not f.startswith("__loud_")
     ]
     return sorted(files, key=lambda x: x.lower())
+
+def audio_slot_number(filename: str) -> int | None:
+    stem, ext = os.path.splitext(filename)
+    if ext.lower() not in AUDIO_EXTS or not stem.isdigit():
+        return None
+    return int(stem)
 
 def song_name(filename: str) -> str:
     return os.path.splitext(filename)[0]
@@ -227,16 +241,19 @@ async def process_loud(audio_path: str) -> tuple[bool, str]:
         "volume=49.5dB"
     )
 
-    proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y", "-i", audio_path,
-        "-af", af,
-        "-ac", "2",
-        "-ar", "48000",
-        "-c:a", "pcm_s16le",
-        out,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", audio_path,
+            "-af", af,
+            "-ac", "2",
+            "-ar", "48000",
+            "-c:a", "pcm_s16le",
+            out,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as exc:
+        return False, f"ffmpeg indisponibil: {exc}"
     _, stderr = await proc.communicate()
     if proc.returncode == 0 and os.path.isfile(out):
         return True, out
@@ -277,10 +294,11 @@ def make_source(audio_path: str, seek_secs: float = 0) -> discord.AudioSource:
 # ── VC state helpers (rejoin after restart) ────────────────────
 def save_vc_state(channel_id: int, audio_path: str, start_ts: float, is_dm: bool) -> None:
     try:
+        os.makedirs(os.path.dirname(STATE_FILE) or AUDIO_DIR, exist_ok=True)
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump({"channel_id": channel_id, "audio_path": audio_path,
                        "start_ts": start_ts, "is_dm": is_dm}, f)
-    except Exception:
+    except (OSError, TypeError, ValueError):
         pass
 
 def load_vc_state() -> dict | None:
@@ -297,15 +315,15 @@ def clear_vc_state() -> None:
         pass
 
 async def get_audio_duration(path: str) -> float:
-    proc = await asyncio.create_subprocess_exec(
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", path,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-    )
-    out, _ = await proc.communicate()
     try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
         return float(out.decode().strip())
-    except Exception:
+    except (OSError, ValueError, UnicodeDecodeError):
         return 0.0
 
 async def _auto_process_on_start() -> None:
@@ -426,6 +444,10 @@ def load_pack_messages(path: str, pack_format: str = "plain") -> list[str]:
 
 async def api_post(sess: aiohttp.ClientSession, token: str, channel_id: int, content: str):
     try:
+        # Discord rejects messages longer than 2,000 characters.
+        content = content[:2000]
+        if not content:
+            return
         async with sess.post(
             f"{DISCORD_API}/channels/{channel_id}/messages",
             headers={"authorization": token, "content-type": "application/json"},
@@ -454,7 +476,7 @@ async def _spam_loop(stype: str, idx: int, channel_id: int, mentions_str: str):
         return
     async with aiohttp.ClientSession() as sess:
         while SPAM_RUNNING.get(key):
-            delay   = SPAM_DELAY.get(key, DEFAULT_DELAY)
+            delay   = max(0.1, SPAM_DELAY.get(key, DEFAULT_DELAY))
             typing  = SPAM_TYPING.get(key, False)
             try:
                 if stype == "s":
@@ -656,7 +678,11 @@ HELP_SUS = (
 def make_bot(token: str, index: int, config: dict) -> discord.Client:
     from discord.ext import commands
     idx    = str(index)
-    prefix = config.get("prefixes", {}).get(idx, BASE_PREFIX)
+    prefixes = config.get("prefixes")
+    if not isinstance(prefixes, dict):
+        prefixes = {}
+        config["prefixes"] = prefixes
+    prefix = prefixes.get(idx, BASE_PREFIX)
     bot    = commands.Bot(command_prefix=prefix, self_bot=True)
 
     loop_active:    dict[int, bool] = {}
@@ -670,6 +696,7 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
 
     async def send_ansi(ch, text: str) -> None:
         try:
+            text = text[:1980]
             await ch.send(f"```ansi\n{text}\n```")
         except Exception:
             try:
@@ -738,8 +765,10 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
             await send_ansi(reply_ch,
                 f"{GR}[{BL}Voice{GR}]{R} {WH}{target_ch.name}{R} {GR}>{R} {BL}{name}{R}")
         except discord.Forbidden:
+            loop_active[gid] = False
             await send_ansi(reply_ch, f"{GR}[{YL}ERR{GR}]{R} {YL}Nu am permisiune.{R}")
         except Exception as exc:
+            loop_active[gid] = False
             await send_ansi(reply_ch, f"{GR}[{YL}ERR{GR}]{R} {YL}{exc!r}{R}")
 
     async def connect_dm(dm_ch, audio_path, reply_ch) -> None:
@@ -874,6 +903,7 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
             if guild.voice_client is not None:
                 guild.voice_client.stop()
                 await guild.voice_client.disconnect()
+                clear_vc_state()
                 await send_ansi(ch, f"{GR}[{BL}Stop{GR}]{R} {WH}Oprit.{R}")
             else:
                 await send_ansi(ch, f"{YL}Nu e conectat.{R}")
@@ -892,11 +922,14 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
                 await vc.disconnect()
                 stopped = True
             if stopped:
+                clear_vc_state()
                 await send_ansi(ch, f"{GR}[{BL}Stop{GR}]{R} {WH}Oprit din tot.{R}")
             else:
                 await send_ansi(ch, f"{YL}Nu e conectat nicaieri.{R}")
 
     async def do_stopall(ch) -> None:
+        for gid in list(loop_active.keys()):
+            loop_active[gid] = False
         for cid in list(dm_loop_active.keys()):
             dm_loop_active[cid] = False
         for vc in list(bot.voice_clients):
@@ -905,6 +938,7 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
                 await vc.disconnect()
             except Exception:
                 pass
+        clear_vc_state()
         await send_ansi(ch, f"{GR}[{BL}Stop{GR}]{R} {WH}Oprit din tot (servere + DM).{R}")
 
     async def do_swap(args: str, guild, ch) -> None:
@@ -965,13 +999,10 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
 
     async def do_addaudio(args: str, msg: discord.Message, ch) -> None:
         def _next_num() -> int:
-            existing = [f for f in os.listdir(AUDIO_DIR)
-                        if f.endswith(".mp3") and not f.startswith("__loud_")]
-            nums = []
-            for f in existing:
-                m = re.match(r"(\d+)\.(?:mp3|m4a|ogg|wav)", f)
-                if m:
-                    nums.append(int(m.group(1)))
+            nums = [
+                slot for f in list_audio()
+                if (slot := audio_slot_number(f)) is not None
+            ]
             return max(nums, default=0) + 1
 
         url = args.strip()
@@ -980,10 +1011,20 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
             nxt      = _next_num()
             out_path = os.path.join(AUDIO_DIR, f"{nxt:02d}.mp3")
             await send_ansi(ch, f"{GR}[{YL}Download{GR}]{R} {WH}{nxt:02d}.mp3{R}")
-            async with aiohttp.ClientSession() as session:
-                async with session.get(att.url) as resp:
-                    with open(out_path, "wb") as f:
-                        f.write(await resp.read())
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(att.url) as resp:
+                        if resp.status != 200:
+                            await send_ansi(
+                                ch,
+                                f"{YL}Nu am putut descarca fisierul (HTTP {resp.status}).{R}",
+                            )
+                            return
+                        with open(out_path, "wb") as f:
+                            f.write(await resp.read())
+            except (aiohttp.ClientError, OSError) as exc:
+                await send_ansi(ch, f"{YL}Eroare la descarcare: {exc!r}{R}")
+                return
             await send_ansi(ch, f"{GR}[{YL}Process{GR}]{R} {WH}Fac ultra loud...{R}")
             ok, result = await process_loud(out_path)
             if ok:
@@ -1000,14 +1041,18 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
         await send_ansi(ch, f"{GR}[{YL}Download{GR}]{R} {WH}Descarc de pe YouTube...{R}")
         nxt = _next_num()
         out_template = os.path.join(AUDIO_DIR, f"{nxt:02d}.%(ext)s")
-        proc = await asyncio.create_subprocess_exec(
-            "yt-dlp", "--extract-audio", "--audio-format", "mp3",
-            "--audio-quality", "0",
-            "-o", out_template,
-            "--no-playlist", "--print", "after_move:filepath", url,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "yt-dlp", "--extract-audio", "--audio-format", "mp3",
+                "--audio-quality", "0",
+                "-o", out_template,
+                "--no-playlist", "--print", "after_move:filepath", url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            await send_ansi(ch, f"{YL}yt-dlp indisponibil: {exc!r}{R}")
+            return
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
             err = stderr.decode("utf-8", errors="replace")[-300:]
@@ -1378,19 +1423,17 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
         # compute target slot name
         existing_nums = set()
         for f in files:
-            m = re.match(r'(\d+)\.(?:mp3|m4a|ogg|wav)', f)
-            if m:
-                existing_nums.add(int(m.group(1)))
+            num = audio_slot_number(f)
+            if num is not None:
+                existing_nums.add(num)
         existing_nums.discard(old_n)
         if new_n in existing_nums:
             # shift everything >= new_n up by one
             shift_files = []
             for f in files:
-                m = re.match(r'(\d+)\.(mp3|m4a|ogg|wav)', f)
-                if m:
-                    num = int(m.group(1))
-                    if num >= new_n and num != old_n:
-                        shift_files.append((f, num, m.group(2)))
+                num = audio_slot_number(f)
+                if num is not None and num >= new_n and num != old_n:
+                    shift_files.append((f, num, os.path.splitext(f)[1].lstrip(".")))
             # sort descending so renaming doesn't clobber
             shift_files.sort(key=lambda x: x[1], reverse=True)
             for f, num, fext in shift_files:
@@ -2160,10 +2203,16 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
         state = load_vc_state()
         if not state:
             return
-        channel_id = state["channel_id"]
-        audio_path = state["audio_path"]
-        start_ts   = state["start_ts"]
-        is_dm      = state.get("is_dm", False)
+        try:
+            channel_id = int(state["channel_id"])
+            audio_path = os.fspath(state["audio_path"])
+            start_ts = float(state["start_ts"])
+            is_dm = bool(state.get("is_dm", False))
+        except (KeyError, TypeError, ValueError):
+            clear_vc_state()
+            return
+        if not os.path.isabs(audio_path):
+            audio_path = os.path.join(AUDIO_DIR, audio_path)
 
         if not os.path.isfile(audio_path):
             clear_vc_state()
@@ -2185,6 +2234,7 @@ def make_bot(token: str, index: int, config: dict) -> discord.Client:
             else:
                 guild = getattr(ch, "guild", None)
                 if guild is None:
+                    clear_vc_state()
                     return
                 loop_active[guild.id] = True
                 vc = await ch.connect(self_deaf=False)
@@ -2292,7 +2342,12 @@ async def _http_server() -> None:
     Asculta pe PORT env var si returneaza un status simplu.
     Fara asta, Render stinge serviciul dupa 15 secunde."""
     import aiohttp.web
-    port = int(os.environ.get("PORT", 8080))
+    try:
+        port = int(os.environ.get("PORT", "8080"))
+    except ValueError:
+        port = 8080
+    if not 1 <= port <= 65535:
+        port = 8080
 
     async def _health(request):
         return aiohttp.web.Response(
