@@ -2315,24 +2315,30 @@ async def _http_server() -> None:
 async def main() -> None:
     global ALL_TOKENS
     _print_banner()
+    # Pornim health-check-ul inainte de validarea tokenurilor, astfel incat
+    # platforma sa detecteze imediat PORT chiar daca Discord raspunde lent.
+    http_task = asyncio.create_task(_http_server())
+    await asyncio.sleep(0)
     raw_tokens = load_tokens()
     config     = load_config()
 
     if not raw_tokens:
         print(f"  {RD}✗  Niciun token gasit!{R}  →  Seteaza {YL}DISCORD_TOKEN{R} in Secrets sau {YL}selfbot/tokens.txt{R}")
+        await http_task
         return
 
     ALL_TOKENS = await validate_all_tokens(raw_tokens)
 
     if not ALL_TOKENS:
         print(f"  {RD}✗  Niciun token valid!{R}  →  Verifica tokenurile si reincearca.")
+        await http_task
         return
 
     print(f"\n  {GN}►  Pornesc {BD}{len(ALL_TOKENS)}{R}{GN} selfbot(uri) valide...{R}\n")
     bots  = [make_bot(tok, i, config) for i, tok in enumerate(ALL_TOKENS)]
     tasks = [asyncio.create_task(b.start(tok)) for b, tok in zip(bots, ALL_TOKENS)]
-    # pornim si serverul HTTP pentru Render.com
-    tasks.append(asyncio.create_task(_http_server()))
+    # serverul HTTP este deja pornit pentru health-check-ul platformei
+    tasks.append(http_task)
     try:
         await asyncio.gather(*tasks)
     except (KeyboardInterrupt, SystemExit):
